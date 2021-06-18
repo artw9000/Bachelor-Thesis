@@ -1,0 +1,723 @@
+---
+title: "Bachelor thesis, IR outcome variable"
+output: html_notebook
+---
+
+```{r}
+library(tidymodels)
+library(randomForest)
+library(ranger)
+library(fastDummies)
+library(writexl)
+library(readxl)
+library(sf)
+library(vip)
+library(rfUtilities)
+library(ggsci)
+
+iris <- read_excel("C:/Users/Artur/OneDrive/Pulpit/df3.xlsx")
+
+iris <- dummy_cols(iris, select_columns = 'SECTOR')
+```
+
+
+## Build model
+
+```{r}
+iris_rec <- recipe(IR ~ GA + FEE + MCAP + PE + TA + MNGR + Bull_Index + SECTOR_B + SECTOR_C + SECTOR_D + SECTOR_E + SECTOR_F + SECTOR_G + SECTOR_H + SECTOR_I, data = iris)
+set.seed(456)
+
+iris_prep <- prep(iris_rec)
+
+iris_split <- initial_split(iris)
+iris_train <- training(iris_split)
+iris_test <- testing(iris_split)
+```
+ 
+
+```{r}
+tune_spec <- rand_forest(
+  mtry = tune(),
+  trees = 1000,
+  min_n = tune()
+) %>%
+  set_mode("regression") %>%
+  set_engine("ranger")
+```
+
+
+```{r}
+tune_wf <- workflow() %>%
+  add_recipe(iris_rec) %>%
+  add_model(tune_spec)
+```
+
+
+## Train hyperparameters
+
+
+```{r}
+set.seed(234)
+iris_folds <- vfold_cv(iris, v = 10, repeats = 5)
+
+doParallel::registerDoParallel()
+
+set.seed(345)
+tune_res <- tune_grid(
+  tune_wf,
+  resamples = iris_folds,
+  grid = 20
+)
+
+tune_res
+tune_res %>% select_best("rmse")
+
+
+```
+
+
+```{r}
+tune_res %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "rmse") + theme_bw() + scale_color_viridis_d()
+```
+
+```{r}
+rf_grid <- grid_regular(
+  mtry(range = c(2, 15)),
+  min_n(range = c(2, 237)),
+  levels = 5
+)
+
+rf_grid
+```
+ 
+```{r}
+set.seed(456)
+regular_res <- tune_grid(
+  tune_wf,
+  resamples = iris_folds,
+  grid = rf_grid
+)
+
+regular_res
+```
+```{r}
+regular_res %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_line(alpha = 0.5, size = 1.5) +
+  geom_point() +
+  labs(y = "rmse") + theme_bw() + scale_color_viridis_d()
+```
+
+```{r}
+best_auc <- select_best(regular_res, "rmse")
+
+final_rf <- finalize_model(
+  tune_spec,
+  best_auc
+)
+
+final_rf
+```
+```{r}
+
+final_rf %>%
+  set_engine("ranger", importance = "permutation") %>%
+  fit(IR ~ GA + FEE + MCAP + PE + TA + MNGR + Bull_Index + SECTOR_B + SECTOR_C + SECTOR_D + SECTOR_E + SECTOR_F + SECTOR_G + SECTOR_H + SECTOR_I,
+      data = juice(iris_prep)) %>% vip(geom = "point")
+```
+
+```{r}
+final_wf <- workflow() %>%
+  add_recipe(iris_rec) %>%
+  add_model(final_rf)
+
+final_res <- final_wf %>%
+  last_fit(iris_split)
+
+final_res %>%
+  collect_metrics()
+```
+
+```{r}
+rf_defaults <- rand_forest(mode = "regression", trees=1000, mtry=15, min_n=60)
+rf_defaults
+
+preds <- c("GA", "FEE", "MCAP", "PE", "TA", "MNGR", "Bull_Index", "SECTOR_B", "SECTOR_C", "SECTOR_D", "SECTOR_E", "SECTOR_F", "SECTOR_G", "SECTOR_H", "SECTOR_I")
+
+rf_xy_fit <- 
+  rf_defaults %>%
+  set_engine("ranger") %>%
+  fit_xy(
+    x = iris[, preds],
+    y = iris$IR
+  )
+
+
+```
+```{r}
+rf_mod <- rand_forest(trees=1000, mtry=15, min_n=60) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+```
+```{r}
+iris_wflow <- 
+  workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(iris_rec)
+
+
+
+set.seed(777)
+folds <- vfold_cv(iris, v=10, repeats = 5)
+flights_fit_rs <- fit_resamples(iris_wflow, folds)
+
+flights_fit_rs$.metrics
+```
+
+
+```{r}
+c <- flights_fit_rs %>%
+    unnest(.metrics)
+
+Method <- c("Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest")
+
+c <- cbind(c, Method)
+
+c <- c %>% select(.metric, .estimate, Method) %>% filter(row_number() %% 2 == 1)
+
+```
+
+
+
+
+```{r}
+test_results <- 
+  iris_test %>%
+  bind_cols(
+    predict(rf_xy_fit, new_data = iris_test[, preds])
+  )
+test_results %>% slice(1:5)
+```
+
+
+## Linear regression
+
+```{r}
+norm_recipe <- 
+  recipe(
+    IR ~ GA + FEE + MCAP + PE + TA + MNGR + Bull_Index + SECTOR_B + SECTOR_C + SECTOR_D + SECTOR_E + SECTOR_F + SECTOR_G + SECTOR_H + SECTOR_I, 
+    data = iris
+  ) %>%
+  step_dummy(all_nominal()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors()) %>%
+  prep(training = iris, retain = TRUE)
+
+lm <- 
+  linear_reg() %>% 
+  set_engine("lm") %>%
+    set_mode("regression") %>%
+  fit(IR ~ GA + FEE + MCAP + PE + TA + MNGR + Bull_Index + SECTOR_B + SECTOR_C + SECTOR_D + SECTOR_E + SECTOR_F + SECTOR_G + SECTOR_H + SECTOR_I, data = iris)
+summary(lm$fit)
+
+
+```
+
+
+
+
+
+```{r}
+test_normalized <- bake(norm_recipe, new_data = iris_test, all_predictors())
+
+test_results <- 
+  test_results %>%
+  rename(`random forest` = .pred) %>%
+  bind_cols(
+    predict(lm, new_data = test_normalized) %>%
+      rename(lm = .pred)
+  )
+test_results
+```
+
+
+```{r}
+test_results %>% 
+  gather(model, prediction, -IR, -GA, -Bull_Index, -FEE, -MCAP, -MNGR, -PE, -SECTOR, -TA, -SECTOR_B, -SECTOR_C, -SECTOR_D, -SECTOR_E, -SECTOR_F, -SECTOR_G, -SECTOR_H, -SECTOR_I) %>% 
+  ggplot(aes(x = prediction, y = IR)) + 
+  geom_abline(col = "green", lty = 2) + 
+  geom_point(alpha = .4) + 
+  facet_wrap(~model) + theme_bw() + coord_fixed(xlim = c(0, 40))
+```
+
+```{r}
+vip(lm)
+```
+
+
+
+```{r}
+lm_mod <- linear_reg() %>% 
+  set_engine("lm") %>%
+    set_mode("regression")
+
+iris_wflow <- 
+  workflow() %>% 
+  add_model(lm_mod) %>% 
+  add_recipe(iris_rec)
+
+
+
+set.seed(777)
+folds_0 <- vfold_cv(iris, v=10, repeats = 5)
+flights_fit_lm <- fit_resamples(iris_wflow, folds_0)
+
+flights_fit_lm$.metrics
+
+
+```
+
+
+
+```{r}
+d <- flights_fit_lm %>%
+    unnest(.metrics)
+
+Method <- c("Linear regression", "Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression")
+
+d <- cbind(d, Method)
+
+d <- d %>% select(.metric, .estimate, Method) %>% filter(row_number() %% 2 == 1)
+```
+
+
+
+
+```{r}
+kabe <- rbind(c, d)
+
+Variable <- c("GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA", "GA")
+
+kabe <- cbind(kabe, Variable)
+```
+
+
+
+
+
+# Excluding GA variable
+
+```{r}
+cars <- read_excel("C:/Users/Artur/OneDrive/Pulpit/df5.xlsx")
+
+cars <- dummy_cols(cars, select_columns = 'SECTOR')
+```
+
+
+```{r}
+cars_rec <- recipe(IR ~ FEE + MCAP + PE + TA + MNGR + Bull_Index + SECTOR_B + SECTOR_C + SECTOR_D + SECTOR_E + SECTOR_F + SECTOR_G + SECTOR_H + SECTOR_I, data = cars)
+set.seed(456)
+
+cars_prep <- prep(cars_rec)
+
+cars_split <- initial_split(cars)
+cars_train <- training(cars_split)
+cars_test <- testing(cars_split)
+```
+
+
+
+```{r}
+tune_spec_cars <- rand_forest(
+  mtry = tune(),
+  trees = 1000,
+  min_n = tune()
+) %>%
+  set_mode("regression") %>%
+  set_engine("ranger")
+```
+
+
+```{r}
+tune_wf_cars <- workflow() %>%
+  add_recipe(cars_rec) %>%
+  add_model(tune_spec_cars)
+```
+
+
+```{r}
+set.seed(234)
+cars_folds <- vfold_cv(cars, v = 10, repeats = 5)
+
+doParallel::registerDoParallel()
+
+set.seed(345)
+tune_res_cars <- tune_grid(
+  tune_wf_cars,
+  resamples = cars_folds,
+  grid = 20
+)
+
+tune_res_cars
+tune_res_cars %>% select_best("rmse")
+
+```
+
+```{r}
+tune_res_cars %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "rmse") + theme_bw() + scale_color_viridis_d()
+```
+
+
+
+```{r}
+rf_grid_cars <- grid_regular(
+  mtry(range = c(2, 14)),
+  min_n(range = c(2, 237)),
+  levels = 5
+)
+
+rf_grid_cars
+```
+
+
+
+```{r}
+set.seed(456)
+regular_res_cars <- tune_grid(
+  tune_wf_cars,
+  resamples = cars_folds,
+  grid = rf_grid_cars
+)
+
+regular_res_cars
+```
+
+
+
+```{r}
+regular_res_cars %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_line(alpha = 0.5, size = 1.5) +
+  geom_point() +
+  labs(y = "rmse") + theme_bw() + scale_color_viridis_d()
+```
+
+
+
+```{r}
+best_auc_cars <- select_best(regular_res_cars, "rmse")
+
+final_rf_cars <- finalize_model(
+  tune_spec_cars,
+  best_auc_cars
+)
+
+final_rf_cars
+```
+
+```{r}
+final_rf_cars %>%
+  set_engine("ranger", importance = "permutation") %>%
+  fit(IR ~ FEE + MCAP + PE + TA + MNGR + Bull_Index + SECTOR_B + SECTOR_C + SECTOR_D + SECTOR_E + SECTOR_F + SECTOR_G + SECTOR_H + SECTOR_I,
+      data = juice(cars_prep)) %>% vip(geom = "point")
+```
+
+
+```{r}
+final_wf_cars <- workflow() %>%
+  add_recipe(cars_rec) %>%
+  add_model(final_rf_cars)
+
+final_res_cars <- final_wf_cars %>%
+  last_fit(cars_split)
+
+final_res_cars %>%
+  collect_metrics()
+```
+
+
+```{r}
+rf_defaults_cars <- rand_forest(mode = "regression", trees=1000, mtry=14, min_n=60)
+rf_defaults_cars
+
+preds_cars <- c("FEE", "MCAP", "PE", "TA", "MNGR", "Bull_Index", "SECTOR_B", "SECTOR_C", "SECTOR_D", "SECTOR_E", "SECTOR_F", "SECTOR_G", "SECTOR_H", "SECTOR_I")
+
+rf_fit_cars <- 
+  rf_defaults_cars %>%
+  set_engine("ranger") %>%
+  fit_xy(
+    x = cars[, preds_cars],
+    y = cars$IR
+  )
+
+
+```
+```{r}
+rf_mod_cars <- rand_forest(trees=1000, mtry=14, min_n=60) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+```
+```{r}
+cars_wflow <- 
+  workflow() %>% 
+  add_model(rf_mod_cars) %>% 
+  add_recipe(cars_rec)
+
+
+
+set.seed(777)
+folds_cars <- vfold_cv(cars, v=10, repeats = 5)
+flights_cars <- fit_resamples(cars_wflow, folds_cars)
+
+flights_cars$.metrics
+```
+
+
+
+```{r}
+f <- flights_cars %>%
+    unnest(.metrics)
+
+Method <- c("Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest", "Random Forest")
+
+f <- cbind(f, Method)
+
+f <- f %>% select(.metric, .estimate, Method) %>% filter(row_number() %% 2 == 1)
+```
+
+
+```{r}
+test_results_cars <- 
+  cars_test %>%
+  bind_cols(
+    predict(rf_fit_cars, new_data = cars_test[, preds_cars])
+  )
+test_results_cars %>% slice(1:5)
+```
+
+## Linear regression
+
+```{r}
+norm_recipe_cars <- 
+  recipe(
+    IR ~ FEE + MCAP + PE + TA + MNGR + Bull_Index + SECTOR_B + SECTOR_C + SECTOR_D + SECTOR_E + SECTOR_F + SECTOR_G + SECTOR_H + SECTOR_I, 
+    data = cars
+  ) %>%
+  step_dummy(all_nominal()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors()) %>%
+  prep(training = cars, retain = TRUE)
+
+lm_cars <- 
+  linear_reg() %>% 
+  set_engine("lm") %>%
+    set_mode("regression") %>%
+  fit(IR ~ FEE + MCAP + PE + TA + MNGR + Bull_Index + SECTOR_B + SECTOR_C + SECTOR_D + SECTOR_E + SECTOR_F + SECTOR_G + SECTOR_H + SECTOR_I, data = cars)
+summary(lm_cars$fit)
+
+
+```
+
+
+```{r}
+test_normalized_cars <- bake(norm_recipe_cars, new_data = cars_test, all_predictors())
+
+test_results_cars <- 
+  test_results_cars %>%
+  rename(`random forest` = .pred) %>%
+  bind_cols(
+    predict(lm_cars, new_data = test_normalized_cars) %>%
+      rename(lm_cars = .pred)
+  )
+test_results_cars
+```
+
+
+```{r}
+test_results_cars %>% 
+  gather(model, prediction, -IR, -Bull_Index, -FEE, -MCAP, -MNGR, -PE, -SECTOR, -TA, -SECTOR_B, -SECTOR_C, -SECTOR_D, -SECTOR_E, -SECTOR_F, -SECTOR_G, -SECTOR_H, -SECTOR_I) %>% 
+  ggplot(aes(x = prediction, y = IR)) + 
+  geom_abline(col = "green", lty = 2) + 
+  geom_point(alpha = .4) + 
+  facet_wrap(~model) + theme_bw() + coord_fixed(xlim = c(-10, 40))
+```
+
+```{r}
+vip(lm_cars)
+```
+
+
+
+```{r}
+lm_mod_cars <- linear_reg() %>% 
+  set_engine("lm") %>%
+    set_mode("regression")
+
+cars_wflow <- 
+  workflow() %>% 
+  add_model(lm_mod_cars) %>% 
+  add_recipe(cars_rec)
+
+
+
+set.seed(777)
+folds_0_cars <- vfold_cv(cars, v=10, repeats = 5)
+flights_fit_cars <- fit_resamples(cars_wflow, folds_0_cars)
+
+flights_fit_cars$.metrics
+
+
+```
+
+
+```{r}
+t <- flights_fit_cars %>%
+    unnest(.metrics)
+
+Method <- c("Linear regression", "Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression","Linear regression")
+
+t <- cbind(t, Method)
+
+t <- t %>% select(.metric, .estimate, Method) %>% filter(row_number() %% 2 == 1)
+```
+
+
+
+
+```{r}
+dose <- rbind(f, t)
+
+Variable <- c("No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA", "No GA")
+
+dose <- cbind(dose, Variable)
+```
+
+
+
+
+## Combining results
+
+
+```{r}
+
+final <- rbind(kabe, dose)
+
+
+o <- ggplot(final, aes(x= Variable, y= .estimate, fill = Variable)) + 
+  geom_boxplot() + facet_wrap(facets = "Method") + labs(y="RMSE", x = "")
+o + coord_flip() + theme_classic() + scale_fill_brewer(palette="Blues") + theme(legend.position="none")
+```
+
+```{r}
+q <- ggplot(final, aes(x= Method, y= .estimate, fill = Method)) + 
+  geom_boxplot() + facet_wrap(facets = "Variable") + labs(y="RMSE", x = "")
+q + coord_flip() + theme_classic() + scale_fill_brewer(palette="Blues") + theme(legend.position="none")
+```
+
+
+
+
+
+
+
+```{r}
+N <- 1
+Var <- "GA"
+Mod <- "Random forest"
+Mean <- mean(c$.estimate)
+stdev <- sd(c$.estimate)
+upper <- Mean + 1.96*(stdev/sqrt(50))
+lower <- Mean - 1.96*(stdev/sqrt(50))
+aaa <- cbind(N, Var, Mod, Mean, stdev, upper, lower)
+
+N <- 2
+Var <- "GA"
+Mod <- "Linear regression"
+Mean <- mean(d$.estimate)
+stdev <- sd(d$.estimate)
+upper <- Mean + 1.96*(stdev/sqrt(50))
+lower <- Mean - 1.96*(stdev/sqrt(50))
+bbb <- cbind(N, Var, Mod, Mean, stdev, upper, lower)
+
+N <- 3
+Var <- "No GA"
+Mod <- "Random forest"
+Mean <- mean(f$.estimate)
+stdev <- sd(f$.estimate)
+upper <- Mean + 1.96*(stdev/sqrt(50))
+lower <- Mean - 1.96*(stdev/sqrt(50))
+ccc <- cbind(N, Var, Mod, Mean, stdev, upper, lower)
+
+N <- 4
+Var <- "No GA"
+Mod <- "Linear regression"
+Mean <- mean(t$.estimate)
+stdev <- sd(t$.estimate)
+upper <- Mean + 1.96*(stdev/sqrt(50))
+lower <- Mean - 1.96*(stdev/sqrt(50))
+ddd <- cbind(N, Var, Mod, Mean, stdev, upper, lower)
+
+eee <- rbind(aaa, bbb, ccc, ddd)
+
+eee <- data.frame(eee)
+eee <- eee %>% mutate(afera = as.numeric(Mean))
+eee <- eee %>% mutate(upper2 = as.numeric(upper))
+eee <- eee %>% mutate(lower2 = as.numeric(lower))
+
+h <- ggplot(eee, aes(x=Var, y=afera, fill = Var)) + geom_errorbar(width=.1, aes(ymin=lower2, ymax=upper2), colour="black") + facet_wrap(facets = "Mod") + labs(y="RMSE", x = "")
+
+h + theme_classic() + scale_fill_brewer(palette="PRGn") + theme(legend.position="none") + geom_point(shape=21, size=3, fill="black") + scale_y_continuous(limits = c(15.8,21)) + coord_flip() 
+```
+
+```{r}
+r <- ggplot(eee, aes(x=Mod, y=afera, fill = Mod)) + geom_errorbar(width=.1, aes(ymin=lower2, ymax=upper2), colour="black") + facet_wrap(facets = "Var") + labs(y="RMSE", x = "")
+
+r + coord_flip() + theme_classic() + scale_fill_brewer(palette="Blues") + theme(legend.position="none") + geom_point(shape=21, size=3, fill="black") + scale_y_continuous(limits = c(15.8,21))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
